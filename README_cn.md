@@ -1,225 +1,303 @@
-# qs 中文文档（README_cn）
+# rescue_robot 中文文档（README_cn）
 
-> 基于 **RDK X5** 的地震坍塌救援机器人控制系统（四轮驱动 + 四关节姿态 + ASR 语音 + DeepSeek 决策 + LoRa 通信）
+> 基于 **RDK X5** 单目视觉的塌方废墟救援寻路机器人（ROS2 / TogetheROS.Bot）
 
 ---
 
 ## 1. 项目简介
 
-`qs` 是一个运行在 D-Robotics **RDK X5** 上的救援机器人"大脑"控制程序。硬件由 **4 个轮式电机（移动）+ 4 个关节舵机（姿态：正身 / 附身 / 趴下）+ 抓取舵机 + ASRPRO 语音模块 + 串口 HMI 触摸屏 + LoRa 数传 + PCA9685 PWM 扩展板**组成。
+`rescue_robot` 是一个运行在 D-Robotics **RDK X5** 上的 ROS2 感知软件包。它采用**纯单目视觉感知方案**——不依赖轮式里程计、IMU、激光雷达或超声波，仅通过一枚单目摄像头完成环境感知，为上层的决策/底盘控制节点提供：
 
-系统采用分层架构：感知 → 决策 → 执行 → 通信 的闭环控制。语音/HMI 作为外部触发输入，DeepSeek 大模型根据感知数据给出高层动作决策，再由 `BodyControl` 驱动底层硬件执行，并通过 LoRa 向指挥中心回传状态。
+- **人体检测**：基于 YOLOv8（可跑 BPU 加速）识别幸存者；
+- **单目测距**：根据人体像素高度估算其与机器人的距离；
+- **单目深度估计**：基于 Depth Anything V2，估计场景深度；
+- **可通行区域分析**：在画面底部 ROI 内判断障碍距离与可通行偏移，用于避障；
+- **云台自动跟踪**：通过 PCA9685 + SG90 舵机驱动 Pan 单轴云台，自动将最大人体框居中。
 
-> 代码、注释与 `TECHNICAL_DOC.md` 均围绕"救援机器人"展开；其硬件形态（四轮 + 关节舵机 + 可切换正身/附身/趴下姿态）等价于一个可变形轮椅/辅助机器人底盘。
-
----
-
-## 2. 软件架构
-
-```
-摄像头(模拟)/感知 ──▶ _perceive() ──▶ _decide() [DeepSeek] ──▶ _execute() [BodyControl] ──▶ _communicate() [LoRa]
-                                                      │
-                        语音/HMI 线程 ──▶ execute_action() ──▶ _execute()
-```
-
-- **入口**：`main.py` 的 `RescueRobot` 类，负责初始化各模块并进入 `main_loop`（每 0.2s 一次）。
-- **分层**：
-  - `Driver/`：硬件驱动（PCA9685、电机、舵机、LoRa、HMI、语音）
-  - `Control/`：姿态控制（`BodyControl`）
-  - `App/`：AI 决策（`DeepSeek`）
-  - `test/`：测试文件
-
-`RescueRobot.ACTION_MAP` 将高层动作关键词映射到 `BodyControl` 方法：
-`forward→upright_forward`、`backward→upright_backward`、`turn_left→upright_left_turn`、`turn_right→upright_right_turn`、`stop→stop`、`lie_down→lie_down_forward`、`lean→lean_forward`、`grab→grab`。
+本包只负责"感知 + 视野控制"，运动控制、路径规划等需由上层节点订阅相应话题自行实现。
 
 ---
 
-## 3. 硬件清单与接线
+## 2. 系统架构
 
-| 硬件 | 接口 / 引脚 | 说明 |
+感知流水线（ROS2 话题通信）：
+
+```
+[相机 MIPI GS130W / USB / 仿真]
+        │  /mipi_cam/image_raw (sensor_msgs/Image, NV12 或 bgr8)
+        ▼
+   camera_node  ──▶ /rescue_robot/image_raw (bgr8)  +  /rescue_robot/camera_info (CameraInfo)
+        │
+        ├────────────▶ body_detector_node (YOLOv8 / BPU)  ──▶ /rescue_robot/body_detections (Detection2DArray)
+        │                                                     └─▶ /rescue_robot/nearest_human_distance (Float32)
+        ├────────────▶ depth_estimator_node (Depth Anything V2) ─▶ /rescue_robot/depth_image (Image, JET)
+        │                                                     ├─▶ /rescue_robot/passable_mask (Image, mono8)
+        │                                                     ├─▶ /rescue_robot/nearest_obstacle_distance (Float32)
+        │                                                     └─▶ /rescue_robot/passable_offset (Int32)
+        └────────────▶ visualization_node (叠加显示 + 状态日志)
+   body_detector_node ─▶ /rescue_robot/body_detections ─▶ camera_servo_node (PCA9685+SG90 云台自动跟踪)
+                                                          └─▶ /rescue_robot/camera_pan_angle (Float64)
+```
+
+---
+
+## 3. 目录结构
+
+```
+rescue_robot/
+├── README.md                  # 英文/原版说明
+├── 项目代码说明.html           # 带样式的 HTML 代码说明
+├── package.xml                # ROS2 包描述
+├── setup.py / setup.cfg       # 构建与入口节点注册
+├── requirements.txt           # Python 依赖
+├── config/                    # 相机/算法/模型转换参数
+│   ├── camera_params.yaml
+│   ├── robot_params.yaml
+│   ├── depth_anything_v2_bpu.yaml
+│   ├── depth_vits_392x518_v124.yaml
+│   └── yolov8n_bpu.yaml
+├── launch/                    # 启动文件
+│   ├── rescue_robot.launch.py
+│   ├── rescue_robot_monocular.launch.py
+│   └── mipi_cam_gs130w.launch.py
+├── rescue_robot/              # ROS2 节点源码
+│   ├── camera_node.py
+│   ├── body_detector_node.py
+│   ├── depth_estimator_node.py
+│   ├── visualization_node.py
+│   ├── camera_servo_node.py
+│   ├── bpu_model.py
+│   ├── bpu_yolov8_detector.py
+│   ├── utils.py
+│   └── __init__.py
+├── scripts/                   # 模型导出 / 转换 / 部署 / 标定 / 仿真脚本
+├── docs/                      # 设计文档与部署指南
+│   ├── 基础设计文档.md
+│   ├── RDK部署指南.md
+│   └── SCP手动部署指南.md
+├── urdf/                      # 机器人 URDF 描述
+│   └── rescue_robot.urdf
+├── test/                      # 单元测试与冒烟测试
+├── resource/                  # 资源占位
+└── patch_inspect*.py          # Python inspect 兼容补丁
+```
+
+---
+
+## 4. 硬件平台
+
+| 硬件 | 说明 |
+|------|------|
+| 主控 | D-Robotics **RDK X5**（亦兼容 X3），运行 **TogetheROS.Bot (TROS) / ROS2 Humble** |
+| 相机 | **RDK GS130W 单目 MIPI 模组**（sensor `sc132gs`，`device_mode=single`，支持 `nv12`/`bgr8`）；USB 摄像头为备选 |
+| 云台舵机 | **SG90** + **PCA9685** I2C PWM 驱动（`i2c_bus=5`，`i2c_address=0x40`，50Hz，脉宽 500~2500µs），Pan 单轴 |
+| BPU 模型 | YOLOv8n（人体检测）；Depth Anything V2 Small（单目深度） |
+
+> GS130W 模组标定参数存于 EEPROM，开启 `mipi_gdc_enable` 后由 GDC 硬件完成去畸变/行对齐，故 `camera_params.yaml` 中畸变系数默认填 0。
+
+---
+
+## 5. 软件依赖
+
+**ROS2 依赖**（`package.xml`）：`rclpy`、`std_msgs`、`sensor_msgs`、`cv_bridge`、`image_transport`、`vision_msgs`，`exec_depend` 含 `robot_state_publisher`、`hobot_mipi_cam`。
+
+**Python 依赖**（`requirements.txt`）：
+```
+opencv-python>=4.8.0
+numpy>=1.24.0
+PyYAML>=6.0
+# 可选（PC 端测试 / ONNX 推理）：onnxruntime>=1.15.0
+```
+
+**系统包**（RDK 上）：
+```bash
+apt install ros-$ROS_DISTRO-cv-bridge ros-$ROS_DISTRO-vision-msgs tros-hobot-mipi-cam
+```
+
+---
+
+## 6. 核心节点说明
+
+所有节点源码位于 `rescue_robot/rescue_robot/`，由 `setup.py` 注册为 `console_scripts` 可执行入口。
+
+### 6.1 `camera_node` — 图像采集
+- **类**：`CameraNode`；**发布**：`/rescue_robot/image_raw`(bgr8)、`/rescue_robot/camera_info`
+- 支持三种模式：**MIPI 代理**（订阅 `/mipi_cam/image_raw`）、**USB 直连**（`usb_device`）、**仿真**（绘制绿色人体矩形）。NV12→BGR 转换；USB 断线每 2s 自动重连。
+- 关键参数：`camera_type`、`simulate`、`width/height`(640/480)、`fps`(30)、`fx/fy/cx/cy`、`k1~k3/p1/p2`。
+
+### 6.2 `body_detector_node` — 人体检测与测距
+- **类**：`BodyDetectorNode`；**订阅**：`/rescue_robot/image_raw`；**发布**：`/rescue_robot/body_detections`(Detection2DArray)、`/rescue_robot/nearest_human_distance`(Float32)
+- 模型初始化优先级：**BPU** → OpenCV DNN 加载同名 `.onnx` → 测试模式（中心模拟框）。
+- 后处理支持 ONNX `[1,84,8400]` 与 BPU 单输出 / 6 头输出（strides `[8,16,32]`，`reg_max=16`，DFL 解码）。
+- 基于 IOU 的简单跟踪，稳定 `track_id`；测距调用 `estimate_human_distance`；无订阅者时跳过推理省算力。
+- 关键参数：`model_path`、`use_bpu`、`conf_threshold`(0.5)、`nms_threshold`(0.45)、`average_human_height`(1.7)、`camera_height`(0.45)、`camera_pitch`(10.0)。
+
+### 6.3 `depth_estimator_node` — 单目深度估计与可通行区域
+- **类**：`DepthEstimatorNode`；**发布**：`/rescue_robot/depth_image`、`/rescue_robot/passable_mask`、`/rescue_robot/nearest_obstacle_distance`、`/rescue_robot/passable_offset`
+- 可订阅外部深度话题（`depth_topic`，支持 `16UC1`/`32FC1`）；否则对 `/rescue_robot/image_raw` 跑 Depth Anything V2。
+- ROI 取图像底部 `[roi_top, roi_bottom]`；可通行掩码 = 深度 > 安全距离，经形态学开/闭运算去噪；最近障碍距离取 ROI 内 5% 分位；偏移调用 `compute_passable_offset`。
+- 关键参数：`use_bpu`、`input_width/height`(518/392)、`safe_distance`(0.8)、`danger_distance`(0.4)、`roi_top`(0.45)、`roi_bottom`(0.85)、`passable_width`(120)。
+
+### 6.4 `visualization_node` — 可视化与日志
+- **类**：`VisualizationNode`；**发布**：`/rescue_robot/overlay_image`、`/rescue_robot/status_log`(JSON)
+- 叠加检测框 + 距离 + 状态文本 + 右下角深度小窗；按 `RobotState` 统计避障次数/累计人体数；检测到人体时按 `save_path` 自动截图（最小间隔 0.5s）；定时发布 JSON 状态日志。
+
+### 6.5 `camera_servo_node` — 舵机云台控制
+- **类**：`CameraServoNode` + `PCA9685Controller`（I2C/SMBus2 PWM 封装）；**发布**：`/rescue_robot/camera_pan_angle`(Float64)
+- 订阅手动遥控 `/rescue_robot/cmd_camera_pan` 与自动跟踪 `/rescue_robot/body_detections`（选面积最大人体框居中）。
+- 无硬件时进入模拟模式只打日志；以 `max_speed`(45°/s) 限角速度平滑逼近。
+
+### 6.6 工具与 BPU 封装
+- `utils.py`：`RobotState` 枚举（EXPLORING/AVOIDING/HUMAN_DETECTED/HUMAN_PAUSED/U_TURN/STOPPED）、`clamp`、`compute_iou`、`estimate_human_distance`、`compute_passable_offset`、`normalize_depth_for_display`。
+- `bpu_model.py`：`BPUModel` 通用封装（依赖 TROS `hobot_dnn.pyeasy_dnn`），导入前设置 `LD_LIBRARY_PATH`/`PATH`，支持 NV12 模型、letterbox、BGR→NV12。
+- `bpu_yolov8_detector.py`：兼容别名（`BPUYolov8Detector = BPUModel`）。
+
+---
+
+## 7. 核心话题表
+
+| 话题 | 类型 | 方向 |
 |------|------|------|
-| RDK X5（主控） | — | 全局 |
-| PCA9685 PWM 板 | I2C 总线 5，地址 `0x40`，OE→GND | 16 路 PWM 核心驱动 |
-| 4× 轮式电机 | 方向：PCA CH0–7；速度：sysfs PWM0/PWM1（物理脚 32/31） | 四轮差速 |
-| 4× 关节舵机 | PCA CH8–11（左前/右前/左后/右后） | 姿态切换 |
-| 抓取舵机（2 路） | PCA CH14/15 | 夹爪 |
-| 360° 旋转夹爪 | 预留 `Driver/1.py`，CH15 | 见"已知问题" |
-| ASRPRO 语音模块 | UART `/dev/ttyS1`，115200 | 语音指令输入 |
-| HMI 串口触摸屏 | UART `/dev/ttyUSB0`，115200，GBK | 触摸控制与状态显示 |
-| LoRa 数传模块 | UART，9600，8N1 | 与指挥中心通信 |
-| 摄像头 | **未实装**；`Control/camera.py` 为空，`main.py` 用 `CameraSimulator` 模拟 | 待实现 |
+| `/rescue_robot/image_raw` | `sensor_msgs/Image`(bgr8) | camera → 检测/深度/可视化 |
+| `/rescue_robot/camera_info` | `sensor_msgs/CameraInfo` | camera → 外部 |
+| `/rescue_robot/body_detections` | `vision_msgs/Detection2DArray` | 检测 → 云台 |
+| `/rescue_robot/nearest_human_distance` | `std_msgs/Float32` | 检测 → 外部 |
+| `/rescue_robot/depth_image` | `sensor_msgs/Image`(JET) | 深度 → 可视化 |
+| `/rescue_robot/passable_mask` | `sensor_msgs/Image`(mono8) | 深度 → 外部 |
+| `/rescue_robot/nearest_obstacle_distance` | `std_msgs/Float32` | 深度 → 外部 |
+| `/rescue_robot/passable_offset` | `std_msgs/Int32` | 深度 → 外部 |
+| `/rescue_robot/cmd_camera_pan` | `std_msgs/Float64` | 外部 → 云台 |
+| `/rescue_robot/camera_pan_angle` | `std_msgs/Float64` | 云台 → 外部 |
+| `/rescue_robot/overlay_image` | `sensor_msgs/Image` | 可视化 → 外部 |
+| `/rescue_robot/status_log` | `std_msgs/String`(JSON) | 可视化 → 外部 |
 
 ---
 
-## 4. 模块说明
+## 8. 配置参数
 
-### 4.1 `main.py` — 入口与编排
-- `class CameraSimulator`：FPS 模拟器，生成 `terrain/obstacles/slope/survivors` 等感知字典；`get_real_image()` 预留真实摄像头接口（当前 `NotImplementedError`）。
-- `class RescueRobot`：系统主类。
-  - `initialize()` 依次初始化：PCA9685 → BodyControl → DeepSeek → LoRa → 语音(ASRVoiceSerial) → HMI(RobotHMI) → 摄像头模拟。任一模块初始化失败会降级为"模拟模式"（置 `None` + ⚠️ 警告），便于无硬件调试。
-  - `main_loop()`：每 0.2s 调用 `_perceive()`（感知）→ `_decide()`（DeepSeek 决策，失败回退 `_local_decision()` 纯规则）→ `_execute()`（经 ACTION_MAP 执行）→ `_communicate()`（LoRa 发送状态 JSON）。
-  - 监听线程：`_voice_listener` / `_hmi_listener` 守护线程将语音/HMI 输入送入 `execute_action()`。
+主要配置文件：`config/camera_params.yaml`（相机内参/类型）、`config/robot_params.yaml`（算法/模型总配置，按节点名分节）。
 
-### 4.2 `App/ds_api.py` — DeepSeek 决策
-- `class DeepSeek`，基于 `openai.OpenAI` 客户端，端点 `https://api.deepseek.com/v1`，模型 `deepseek-chat`。
-- `get_reply(user_text, custom_system_prompt=None)`：核心接口，返回 `choices[0].message.content.strip()`；异常时返回 `"大模型调用失败：..."`。
-- `set_default_prompt(new_prompt)`：修改全局系统提示词（系统提示词设定为"地震救援机器人决策助手"，输出限定 `forward/backward/turn_left/turn_right/stop/lie_down/lean/grab`）。
-- ⚠️ 该文件 `__main__` 段引用了不存在的 `DeepSeekClient`，直接运行会报错；应仅作为模块 import。
+典型参数（`robot_params.yaml`）：
+- `body_detector_node`：`model_path`、`use_bpu`、`class_id`(0)、`conf_threshold`、`nms_threshold`、`input_width/height`、`letterbox`、`input_format`(rgb)、`max_track_miss`(30)
+- `distance_estimation`：`average_human_height`(1.7)、`camera_height`(0.45)、`camera_pitch`(10.0)
+- `depth_estimator_node.depth`：`input_width/height`、`min_depth`(0.1)、`max_depth`(10.0)、`scale`、`offset`、`use_bpu`、`model_path`、`depth_topic`
+- `obstacle_avoidance`：`safe_distance`(0.8)、`danger_distance`(0.4)、`passable_width`(120)、`roi_top`(0.45)、`roi_bottom`(0.85)
+- `camera_servo_node`：servo/auto_track 全参数（`pan_channel`(0)、`i2c_bus`(5)、`i2c_address`(0x40)、`pan_min/max_angle`、`max_speed`、`kp` 等）
+- `visualization_node`：`show_ui`、`publish_overlay`、`log_interval`、`save_path`、`safe_distance`
 
-### 4.3 `Control/arm_wheel.py` — 姿态控制
-- `class BodyControl`，组合 `PCA9685` + `ServoController` + `CarMotor`。
-- 关节舵机通道：`LF_JOINT=8, RF_JOINT=9, LB_JOINT=10, RB_JOINT=11`；抓取通道 `GRAB_CH_A=14, GRAB_CH_B=15`。
-- 姿态角度表 `POSTURE_ANGLES`：`upright={20,20,20,30}`、`lean_forward={0,0,60,60}`、`lie_down={30,30,150,150}`。
-- `_set_posture(name, transition_time=0.5)`：线性插值平滑过渡。
-- 运动方法：`upright_forward/backward`、`lean_forward/backward`、`lie_down_forward/backward`、`upright_left_turn/upright_right_turn`、`grab`、`stop`、`reset`、`get_current_status`。
-- `--test` 触发 `run_unit_tests()`（Mock 校验参数范围与占空比输出）。
-
-### 4.4 `Control/camera.py`
-- **空文件（占位）**。真实摄像头感知由 `main.py::CameraSimulator` 承担；真实接口在 `CameraSimulator.get_real_image()` 预留。
-
-### 4.5 `Driver/pca9685.py` — PCA9685 PWM 底层驱动
-- `class PCA9685`，依赖 `smbus2`，I2C 总线 5，地址 `0x40`，12 位（0~4095）。
-- 接口：`set_pwm_freq`(24~1526Hz)、`set_duty_cycle`、`set_raw_pwm`、`get_channel_raw`、`single_channel_zero`、`all_channel_zero`、`close`；支持上下文管理器。
-- 工具：`check_i2c_permission`、`validate_i2c_dev`。
-
-### 4.6 `Driver/servo.py` — 舵机控制
-- `SingleServo`（角度 0–180，脉冲 0.5–2.5ms）+ `ServoController`（50Hz，通道 8–11 输出）。
-
-### 4.7 `Driver/motor.py` — 四轮电机
-- `class CarMotor`。方向通道 PCA CH0–7；**速度**经 sysfs 硬件 PWM（`/sys/class/pwm/pwmchip0`，PWM0/PWM1，1kHz，65% 占空比）。
-- 方法：`car_stop/car_forward/car_backward/car_left_group_run/car_right_group_run`、`cleanup`（unexport）。
-- 依赖 `/sys/class/pwm/pwmchip0` 存在，通常需要 root 权限。
-
-### 4.8 `Driver/lora.py` — LoRa 数传
-- `class LoraDevice`，9600/8N1/timeout=0.3。后台接收线程 `_recv_loop()`；`send(text)` UTF-8 发送；`list_all_com()` / `select_serial_port()` 枚举并交互选择端口；`__main__` 为收发 demo。
-
-### 4.9 `Driver/hmi.py` — 串口 HMI 触摸屏
-- `class RobotHMI`，默认 `/dev/ttyUSB0`，115200，GBK。指令层 `send_raw_cmd/set_text/switch_page`；页面刷新 `update_main_page/update_gimbal_page/update_arm_page/update_leg_page/update_system_info/update_comm_status`；`parse_recv_line` 支持 `<BTN>/<RESCUE>/<MSG>`；`register_action(name, func)` + `listen_loop()` 阻塞监听并自动执行已注册动作。
-
-### 4.10 `Driver/voice.py` — ASRPRO 语音模块（main.py 实际使用的 ASR 通道）
-- `class ASRVoiceSerial`，默认 `/dev/ttyS1`，115200。
-- 协议：`<READY>` / `<ASR>id,text`；`ACTION_MAP`(snid→动作名)、`PLAY_MAP`(snid→音频编号)；`play_audio(id)` 发 `<PLAY>{id}\n`。
-- `listen(callback)`：循环读串口，命中 asr 时回调 `(snid, text, action_name)` 并自动播报对应音频。含 `MockSerial` 与 `test_with_mock_serial()`，便于无硬件测试。
-
-### 4.11 `Driver/1.py` — 360° 旋转夹爪（`Gripper360`，占位测试模块）
-- 独立测试模块，基于脉宽控制 `stop/open/close`。⚠️ 调用了 `pca.set_pwm_us(...)`，而当前 `pca9685.py` 无此方法，运行会 `AttributeError`。需补 `set_pwm_us` 或改用 `set_raw_pwm`。
-
-### 4.12 `rdkx5_asr_uart.py` — 独立 ASR 中控 demo（"小娅机器人"）
-- **不被 main.py 引用**，是早期/并行开发的独立版 ASR 演示：串口 `/dev/ttyS1`，115200，`ASR_COMMANDS` 字典、`XiaoyaASRController` 中控（先播报再执行动作）。协议与 `Driver/voice.py` 等价。
+> ⚠️ **参数不一致提醒**：`robot_params.yaml` 中人体模型为 `best_256x256.onnx`（`use_bpu=false`），而 `docs/基础设计文档.md` 写的是 `best_detect_bayese_640x640_nv12.bin`，README 又提到 `depth_anything_v2_small.bin`。深度输入尺寸也存在 392×518 与 518×518 的差异。请以实际部署的模型为准，统一修改。
 
 ---
 
-## 5. 主流程（main.py）
+## 9. 构建与运行
 
-```
-initialize()
-  ├─ PCA9685(bus_num=5, addr=0x40)        # 失败→模拟模式
-  ├─ BodyControl(bus_num=5, addr=0x40)
-  ├─ DeepSeek(api_key, base_url, sys_prompt)
-  ├─ LoraDevice(port)                     # 未配置则交互选端口
-  ├─ ASRVoiceSerial(/dev/ttyS1, 115200)   # play_audio(20101) 开机播报
-  ├─ RobotHMI(/dev/ttyUSB0, 115200)       # init_all_ui + register_action ×16
-  └─ CameraSimulator(fps=10)
-start() → main_loop()  # 0.2s 周期
-  ├─ _perceive()      # 模拟帧 scene_analysis + survivors
-  ├─ _decide()        # DeepSeek 决策 / 回退 _local_decision 规则
-  ├─ _execute()       # ACTION_MAP → BodyControl 方法 + 刷新 HMI
-  └─ _communicate()   # 状态 JSON 经 LoRa 发送
-voice/hmi 监听线程 → execute_action() → _execute()
-```
-
-配置默认值在 `main()` 的 `config` 字典：`pca_bus=5`、`pca_addr=0x40`、`lora_port=None`、`voice_port="/dev/ttyS1"`、`hmi_port="/dev/ttyUSB0"`、`camera_fps=10`、`ds_api_key`、`ds_base_url="https://api.deepseek.com/v1"`。
-
----
-
-## 6. ASR 语音交互
-
-两套实现：
-1. **`Driver/voice.py`（main.py 集成）**：`ASRVoiceSerial`，协议 `<ASR>id,text`，命中后自动 `play_by_snid` 播报对应音频并回调执行动作。
-2. **`rdkx5_asr_uart.py`（独立 demo）**：`XiaoyaASRController`，先播报 `<PLAY>id` 再延迟执行动作桩（打印 TODO）。
-
-ASRPRO 端需 `Serial.begin(115200)` 且以 `\n` 结尾发送文本（`readStringUntil('\n')`）。
-
----
-
-## 7. DeepSeek 决策
-
-- 模块：`App/ds_api.py: DeepSeek`，OpenAI 兼容端点 `https://api.deepseek.com/v1`，模型 `deepseek-chat`。
-- 主循环 `_decide()` 调用 `get_reply()`，再从回复中匹配动作关键词；大模型不可用时回退 `_local_decision()` 纯规则：不可通行→`turn_left`、障碍→`turn_right`、窄道/坡→`lean`、楼梯→`lie_down`、否则 `forward`。
-- 系统提示词约束输出为 8 个固定动作之一。
-
-> ⚠️ **安全提醒（重要）**：DeepSeek API Key 目前以**明文硬编码**形式同时出现在 `main.py` 的 `config` 与 `ds_api.py` 的构造参数默认值中。请立即将其移出源码，改为从环境变量读取（如 `os.getenv("DEEPSEEK_API_KEY")`）或放入不被提交的配置文件 / 密钥管理服务，**切勿将含密钥的代码提交到仓库**。
-
----
-
-## 8. 安装与运行
-
-**依赖安装**（仓库暂无 `requirements.txt`，建议补充）：
+**构建（colcon）**：
 ```bash
-pip install openai smbus2 pyserial
+cd ~/ros2_ws
+source /opt/tros/setup.bash
+colcon build --packages-select rescue_robot --symlink-install
+source install/setup.bash
 ```
 
-**硬件前置检查**：
+**启动**：
 ```bash
-i2cdetect -y 5          # 应出现 0x40 (PCA9685)
-ls /sys/class/pwm/      # 应有 pwmchip0（电机速度 PWM）
-ls /dev/ttyS1 /dev/ttyUSB0   # 语音 / HMI 串口存在
+ros2 launch rescue_robot rescue_robot.launch.py             # 纯视觉节点（默认）
+ros2 launch rescue_robot mipi_cam_gs130w.launch.py         # GS130W 相机驱动（需先启）
+ros2 launch rescue_robot rescue_robot_monocular.launch.py  # 相机+视觉一体
 ```
-I2C 需用户在 `i2c` 组或 `sudo`；PWM/GPIO 通常需 root。
+> ⚠️ `rescue_robot.launch.py` 内部已启动 `camera_servo_node`，而 `rescue_robot_monocular.launch.py` 又额外启动同名节点，**会重复启动同一节点名**，实际运行可能冲突。如需一体启动，建议仅保留一个 `camera_servo_node`。
 
-**运行主系统**：
+单节点运行：
 ```bash
-# 在 RDK X5 上，已接好 PCA9685、ASRPRO、HMI、LoRa
-cd /path/to/qs
-python3 main.py          # Ctrl+C 优雅停止并清理资源
-```
-
-**运行独立 ASR demo**：
-```bash
-python3 rdkx5_asr_uart.py   # 需 ASRPRO 接 ttyS1
-```
-
-**单模块自测（各自 `__main__`）**：
-```bash
-python3 Driver/pca9685.py [--debug]
-python3 Driver/motor.py [--debug]
-python3 Driver/voice.py            # 串口失败自动转 MockSerial 测试
-python3 Control/arm_wheel.py [--debug] | --test
-python3 Driver/lora.py             # 交互式收发
-python3 Driver/1.py                # ⚠️ 需先补 PCA9685.set_pwm_us
+ros2 run rescue_robot camera_node
+ros2 run rescue_robot body_detector_node
+ros2 run rescue_robot depth_estimator_node
+ros2 run rescue_robot visualization_node
+ros2 run rescue_robot camera_servo_node
 ```
 
 ---
 
-## 9. 测试说明
+## 10. 部署到 RDK X5
 
-| 文件 | 状态 | 说明 |
-|------|------|------|
-| `test/cmara_wheel_test.py` | 空（占位） | 摄像头+轮子测试，未实现 |
-| `test/ds_stage.py` | 空（占位） | DeepSeek 测试，未实现 |
-| `test/hmi_all_test.py` | 空（占位） | HMI 全功能测试，未实现 |
-| `test/motor_test.py` | 历史遗留、不可运行 | 引用了不存在的 `MotorController/MotorPWMError/MotorGPIOError`；但其中的编码器 GPIO 引脚表（BCM 17/27/22/23/5/6/26/16）有参考价值 |
-| `test/voice_all_test.py` | 空（占位） | 语音全功能测试，未实现 |
+提供三种方式（详见 `docs/`）：
 
-> 实际可用的测试入口分散在各模块自身的 `__main__` 与 `Driver/voice.py::test_with_mock_serial`、`Control/arm_wheel.py::run_unit_tests()`。
+1. **PowerShell 一键**：`scripts/deploy_to_rdk.ps1`（先改 `RDK_IP`）。
+2. **Bash 部署**：`scripts/deploy_to_rdk.sh`（默认 `RDK_USER=sunrise`、`RDK_IP=192.168.31.174`、`RDK_PORT=22`、`RDK_WORKSPACE=/home/sunrise/ros2_ws`）。
+3. **手动 SCP**：打包 → `scp` 到 `/tmp/` → `ssh` 内解压到 `src/` → `colcon build`（见 `docs/SCP手动部署指南.md`）。
+
+`scripts/deploy_models.sh` 会在 RDK 上建立 `/opt/rescue_robot/models`，并拷贝 YOLOv8 / 深度 bin 与 TROS 自带的 `mono2d_body_detection.bin`。
 
 ---
 
-## 10. 已知问题 / TODO
+## 11. 模型转换（可选 BPU 加速）
 
-1. **API Key 硬编码**（高优先级）：见第 7 节，务必移出源码。
-2. **`Driver/1.py` 不兼容**：调用了 `pca.set_pwm_us(...)`，需补该方法或改用 `set_raw_pwm`。
-3. **`test/motor_test.py` 不可运行**：引用的符号已不存在，且电机速度实际由 sysfs PWM 实现，与其中描述不符。
-4. **`ds_api.py::__main__` 引用 `DeepSeekClient`**：仅应作为模块 import。
-5. **摄像头未实装**：`Control/camera.py` 为空，`main.py` 仅用 `CameraSimulator` 模拟；真实人物识别/路况识别待实现。
-6. **TECHNICAL_DOC.md 与代码偏差**：文档称 `main.py` 为"待实现"（实际已完成）；文档未涵盖 `voice.py/hmi.py/camera.py/rdkx5_asr_uart.py/1.py` 及 `test/`；文档电机速度写"0–100% 占空比"，实际为 sysfs 固定 65% PWM，PCA9685 仅负责方向。
+YOLOv8：
+```bash
+python3 scripts/export_yolov8_onnx.py          # PC 端导出 ONNX（需 ultralytics）
+python3 scripts/generate_calib_data.py         # 生成标定图片
+bash scripts/convert_yolov8_bpu.sh yolov8n     # 需 D-Robotics hb_mapper / Docker
+```
+
+深度模型：
+```bash
+python3 scripts/export_depth_anything_v2_onnx.py --model-dir /opt/rescue_robot/models
+# 用 config/depth_anything_v2_bpu.yaml 或 depth_vits_392x518_v124.yaml 转 BPU
+```
+
+转换后把 `.bin` 放到 `/opt/rescue_robot/models/`，并在 `robot_params.yaml` 设 `model_path` 与 `use_bpu: true`。
+
+> ⚠️ `config/yolov8n_bpu.yaml` 的 `march: bernoulli2` 对应 **X3**；本项目目标板是 **RDK X5**，应改为 `bayes` / `bayes-e`。
 
 ---
 
-## 11. 文档索引
+## 12. 相机标定
+
+`scripts/camera_calibration.py` 支持棋盘格标定（`-collect` 采集、`calibrate`、`save_yaml`、`update_config_yaml` 写回 `config/camera_params.yaml`）。GS130W 因 EEPROM 已标定，一般无需此脚本。
+
+---
+
+## 13. PC 离线仿真
+
+```bash
+python3 scripts/offline_simulation.py
+```
+不依赖 ROS2/BPU，`OfflineCamera` / `OfflineBodyDetector` / `OfflineDepthEstimator` / `OfflineNavigator` 四类复现检测 + 深度 + 决策 + 可视化窗口。`scripts/test_yolov8_onnx.py` 可在 PC 上直接测 YOLOv8 ONNX（输出 `yolov8_result.jpg`）。
+
+---
+
+## 14. 测试
+
+```bash
+pytest test/test_utils.py            # 工具函数单元测试（clamp/IOU/测距/偏移等）
+pytest test/test_nodes_smoke.py      # 节点导入冒烟测试（camera 初始化需 ROS2 环境，已 skip）
+```
+
+---
+
+## 15. 补丁脚本说明
+
+`patch_inspect*.py`（patch_inspect / patch_inspect2 / patch_inspect3）用于**就地修补 Python 标准库 `inspect.py`**，修复某依赖（疑似 `hobot_dnn` / `pyeasy_dnn` 在导入时触发 inspect 反射）与当前 Python 解释器 `inspect` 不兼容导致的崩溃。三者采用不同改写策略，目的相同。
+
+> ⚠️ `patch_bpu_revert.py` 当前为 **0 字节空文件**，疑似"还原补丁"占位/未实现。如需还原 inspect，请手动恢复被改动的 `inspect.py`，或补全该脚本。
+
+---
+
+## 16. 文档索引
 
 | 文档 | 内容 |
 |------|------|
-| `TECHNICAL_DOC.md` | v1.0 技术文档：系统概述、模块接口表、核心业务流程、LoRa JSON 格式、未完成功能、硬件连接表（部分过时） |
+| `README.md` | 项目概况、目录、依赖、部署、运行、核心话题、关键参数、相机标定、模型部署 |
+| `项目代码说明.html` | 带样式的 HTML 版代码说明 |
+| `docs/基础设计文档.md` | 最详尽：系统架构图、节点职责表、算法公式、话题/参数表、模型格式 |
+| `docs/RDK部署指南.md` | 三种部署方式、自定义 YOLOv8 BPU 转换、FAQ |
+| `docs/SCP手动部署指南.md` | 纯 tar+scp+colcon 手动步骤与 Windows 命令参考 |
 
-> 本 `README_cn.md` 以**代码为准**编写；涉及与 `TECHNICAL_DOC.md` 冲突处以代码为准，并已在第 10 节标注偏差。
+---
+
+## 17. 已知问题 / 注意事项
+
+1. `rescue_robot_monocular.launch.py` 会重复启动 `camera_servo_node`，建议修正。
+2. 模型名/尺寸/`march` 在多处文档与配置间不一致，部署前统一。
+3. `patch_bpu_revert.py` 为空，补丁还原流程未实现。
+4. 纯视觉方案不依赖里程计，定位/回环需上层自行处理。
