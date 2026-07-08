@@ -1,0 +1,112 @@
+# 机器人算法参数（ROS2 标准参数文件格式）
+# 顶层键为节点名，下方必须包含 ros__parameters 键
+
+body_detector_node:
+  ros__parameters:
+    # 人体检测模型参数
+    body_detection:
+      model_path: /opt/rescue_robot/models/best_256x256.onnx
+      use_bpu: false
+      class_id: 0
+      conf_threshold: 0.2
+      nms_threshold: 0.45
+      input_width: 256
+      input_height: 256
+      letterbox: true
+      input_format: rgb
+      # 跟踪 ID 最大丢失帧数
+      max_track_miss: 30
+
+    # 单目人体测距参数
+    distance_estimation:
+      # 人体标准身高（米）
+      average_human_height: 1.7
+      # 相机离地高度（米）
+      camera_height: 0.45
+      # 相机俯仰角（度，向下为正）
+      camera_pitch: 10.0
+
+depth_estimator_node:
+  ros__parameters:
+    # 深度模型参数（单目深度估计）
+    depth:
+      # 模型输入尺寸（Depth Anything V2 Small 392x518 ONNX shape [1,3,392,518]）
+      input_width: 518
+      input_height: 392
+      # 深度值范围（米）
+      min_depth: 0.1
+      max_depth: 10.0
+      # 模型输出缩放与偏移（相对深度模型需标定，metric 模型保持 1.0/0.0）
+      scale: 1.0
+      offset: 0.0
+      # 是否使用 BPU 加速
+      use_bpu: false
+      # 模型路径
+      model_path: /opt/rescue_robot/models/depth_v2_small_392x518.onnx
+      # 外部深度节点话题（为空时使用本节点单目深度推理）
+      depth_topic: ''
+
+    # 深度避障/可通行区域参数
+    obstacle_avoidance:
+      # 深度图安全距离阈值（米）
+      safe_distance: 0.8
+      # 危险距离（米）
+      danger_distance: 0.4
+      # 通行区域宽度（像素）
+      passable_width: 120
+      # ROI 高度范围（图像底部区域）
+      roi_top: 0.45
+      roi_bottom: 0.85
+
+camera_servo_node:
+  ros__parameters:
+    servo:
+      # PCA9685 通道号（水平 Pan）
+      pan_channel: 0
+      # I2C 总线号，RDK 通常为 1
+      i2c_bus: 5
+      # PCA9685 默认地址
+      i2c_address: 0x40
+      # PWM 频率 (Hz)，SG90 标准 50Hz
+      frequency: 50
+      # Pan 角度范围（度）
+      pan_min_angle: -90.0
+      pan_max_angle: 90.0
+      # 初始角度
+      pan_initial_angle: 0.0
+      # 模拟模式：无硬件时只打印日志
+      simulation: false
+      # 最大角速度（度/秒），限制过快转动
+      max_speed: 45.0
+      # SG90 脉宽范围（微秒），视具体舵机微调
+      pulse_min_us: 500
+      pulse_max_us: 2500
+
+    auto_track:
+      # 是否启用人体自动跟踪
+      enabled: true
+      # 图像宽度（像素），用于计算像素-角度映射
+      image_width: 640
+      # 相机水平视场角（度），GS130W 640x480 约 60~70 度
+      hfov_deg: 60.0
+      # 比例控制增益，越大跟踪越灵敏
+      kp: 0.8
+      # 手动遥控后自动跟踪的静默时间（秒）
+      manual_override_sec: 2.0
+
+visualization_node:
+  ros__parameters:
+    # 可视化参数
+    visualization:
+      # SSH无显示器改为false，消除Qt崩溃
+      show_ui: false
+      # 发布 overlay 图像
+      publish_overlay: true
+      # 日志间隔（秒）
+      log_interval: 5.0
+      # 截图保存路径（为空则不保存）
+      save_path: ''
+
+    # 可视化节点需要安全距离用于统计避障次数
+    obstacle_avoidance:
+      safe_distance: 0.8

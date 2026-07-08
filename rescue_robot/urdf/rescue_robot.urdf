@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<robot name="rescue_robot">
+  <!-- 基础坐标系：机器人底盘中心，贴近地面 -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.3 0.2 0.15"/>
+      </geometry>
+      <material name="gray">
+        <color rgba="0.5 0.5 0.5 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.3 0.2 0.15"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- 单目摄像头链接 -->
+  <link name="camera_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.03 0.04 0.02"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.1 0.1 0.1 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <!-- 摄像头安装在底盘前方 15cm、高 45cm 处，俯仰 10 度 -->
+  <joint name="camera_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_link"/>
+    <origin xyz="0.15 0 0.45" rpy="0 -0.1745 0"/>
+  </joint>
+</robot>

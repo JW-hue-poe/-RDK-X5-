@@ -1,0 +1,68 @@
+# YOLOv8n ONNX 转 RDK BPU bin 配置文件
+# 适用于 D-Robotics hb_mapper 工具链
+#
+# 使用前请确认：
+#   1. RDK 芯片型号与 march 匹配：
+#      - RDK X3 / X3 Module -> bernoulli2
+#      - RDK X5 / Ultra     -> bayes  （请以 D-Robotics 官方文档为准）
+#   2. 已安装 hb_mapper 并在 PATH 中可用
+#   3. calibration_data/ 目录下已准备标定图片
+#
+# 转换命令：
+#   hb_mapper makertbin --config config/yolov8n_bpu.yaml --model yolov8n.onnx
+
+model_parameters:
+  # ONNX 模型路径（相对本配置文件或绝对路径）
+  onnx_model: 'yolov8n.onnx'
+
+  # BPU 架构，根据 RDK 型号选择
+  march: 'bernoulli2'
+
+  # 是否导出每层输出（调试用）
+  layer_out_dump: False
+
+  # 工作目录
+  working_dir: './bpu_output'
+
+  # 输出模型前缀
+  output_model_file_prefix: 'yolov8n'
+
+input_parameters:
+  # ONNX 输入节点名，YOLOv8 默认为 images
+  input_name: 'images'
+
+  # 运行时输入类型与布局
+  input_type_rt: 'rgb'
+  input_layout_rt: 'NCHW'
+
+  # 训练时输入类型与布局（与 export_yolov8_onnx.py 导出参数一致）
+  input_type_train: 'rgb'
+  input_layout_train: 'NCHW'
+
+  # 归一化方式：data_scale 表示除以 255
+  norm_type: 'data_scale'
+  scale_value: 0.003921568627451
+
+  # 固定输入尺寸，与 ONNX 一致
+  input_shape: '1x3x640x640'
+
+calibration_parameters:
+  # 标定数据目录，需存放若干 640x640 的 rgb 图片（jpg/png）
+  # 建议从 COCO 数据集中选取 100~200 张包含人体的图片
+  cal_data_dir: './calibration_data'
+
+  # 标定数据类型
+  cal_data_type: 'float32'
+
+  # 是否由工具链自动做预处理（与 input_parameters 一致）
+  preprocess_on: True
+
+compiler_parameters:
+  # 编译模式：latency / performance
+  compile_mode: 'latency'
+
+  # 优化等级
+  optimize_level: 'O3'
+
+  # 调试开关
+  debug: False

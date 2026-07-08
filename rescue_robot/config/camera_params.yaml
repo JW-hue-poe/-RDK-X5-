@@ -1,0 +1,45 @@
+# 相机参数配置
+# 本配置默认适配 RDK GS130W 单目 MIPI 摄像头
+# GS130W 标定参数存储在模组 EEPROM 中，mipi_cam 启动 GDC 后自动读取并完成硬件去畸变
+# 因此 camera_node 中只需保留 rectified 后的内参，畸变系数在 GDC 启用时会被自动置 0
+
+# camera_node 使用以下参数
+camera_node:
+  ros__parameters:
+    camera:
+      # 摄像头类型：mipi / usb
+      camera_type: mipi
+      # MIPI 摄像头发布的话题，启动 mipi_cam 后默认发布 /mipi_cam/image_raw
+      mipi_topic: /mipi_cam/image_raw
+      # 是否启用 mipi_cam 的 GDC 硬件去畸变（GS130W 推荐开启）
+      mipi_gdc_enable: true
+      # USB 摄像头设备号（仅 usb 模式有效）
+      usb_device: 0
+      # 图像尺寸（RDK GS130w 支持 1280x960 或 640x480）
+      width: 640
+      height: 480
+      # 帧率
+      fps: 30
+      # 是否发布 camera_info
+      publish_info: true
+      # 内参矩阵（GDC 校正后的 rectified 内参，GS130W 640x480 参考值）
+      fx: 609.0
+      fy: 609.0
+      cx: 320.0
+      cy: 240.0
+      # 畸变系数（GDC 启用时无效，会被自动置 0）
+      k1: 0.0
+      k2: 0.0
+      p1: 0.0
+      p2: 0.0
+      k3: 0.0
+
+# body_detector_node 相机内参（用于人体测距）
+# 模型参数统一在 robot_params.yaml 中配置，避免重复
+body_detector_node:
+  ros__parameters:
+    camera:
+      fx: 609.0
+      fy: 609.0
+      cx: 320.0
+      cy: 240.0

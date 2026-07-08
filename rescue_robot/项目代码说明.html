@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>基于RDK单目视觉的救援机器人 - 视觉-only代码说明</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --card: #161b22;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --heading: #e6edf3;
+  --accent: #2f81f7;
+  --accent-hover: #58a6ff;
+  --success: #238636;
+  --warning: #f0883e;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 20px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+}
+.container { max-width: 960px; margin: 0 auto; }
+h1 {
+  color: var(--heading);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+}
+h2 { color: var(--heading); margin-top: 32px; }
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 16px 0;
+  overflow: hidden;
+}
+.card-header {
+  background: rgba(255,255,255,0.03);
+  padding: 14px 18px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  color: var(--heading);
+  user-select: none;
+}
+.card-header:hover { background: rgba(255,255,255,0.06); }
+.card-body {
+  padding: 0 18px;
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.25s ease, padding 0.25s ease;
+}
+.card.open .card-body {
+  max-height: 2000px;
+  padding: 14px 18px 18px;
+}
+.toggle { color: var(--accent); font-size: 1.2rem; transition: transform 0.2s; }
+.card.open .toggle { transform: rotate(90deg); }
+code, pre {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  background: #1f242c;
+  border-radius: 4px;
+}
+code { padding: 2px 6px; font-size: 0.9em; }
+pre {
+  padding: 14px;
+  overflow-x: auto;
+  font-size: 0.85em;
+  border: 1px solid var(--border);
+}
+ul { padding-left: 20px; }
+li { margin: 6px 0; }
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.8em;
+  margin-left: 8px;
+}
+.badge-core { background: var(--accent); color: #fff; }
+.badge-tool { background: var(--success); color: #fff; }
+.note {
+  border-left: 4px solid var(--accent);
+  background: rgba(47,129,247,0.08);
+  padding: 12px 16px;
+  margin: 16px 0;
+  border-radius: 0 8px 8px 0;
+}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>基于RDK单目视觉的救援机器人 - 视觉-only版本</h1>
+<p>本代码包仅包含视觉感知部分，提供图像采集、人体检测、单目深度估计、可通行区域分析和可视化节点。决策规划与底盘控制未包含，可订阅本包发布的话题自行接入。</p>
+
+<div class="note">
+<strong>项目根目录：</strong><code>rescue_robot/</code> 位于当前工作空间下。在 RDK 板上可放入 <code>~/ros2_ws/src</code> 后执行 <code>colcon build</code> 编译。
+</div>
+
+<h2>一、项目结构</h2>
+<div class="card open">
+  <div class="card-header" onclick="toggle(this)">
+    <span>rescue_robot/ 目录说明</span>
+    <span class="toggle">▶</span>
+  </div>
+  <div class="card-body">
+<pre>
+rescue_robot/
+├── rescue_robot/                  # 节点源码
+│   ├── camera_node.py             # 相机采集（USB / MIPI 转发）
+│   ├── body_detector_node.py      # 人体检测 + 单目测距
+│   ├── depth_estimator_node.py    # 单目深度估计 + 可通行区域分析
+│   ├── visualization_node.py      # 实时可视化 + 日志记录
+│   └── actuator_bridge_example.py # 视觉 -> 电机/舵机桥接示例
+├── config/
+│   ├── camera_params.yaml         # 相机标定参数
+│   └── robot_params.yaml          # 视觉算法参数
+├── launch/
+│   ├── rescue_robot.launch.py              # 启动视觉节点
+│   ├── rescue_robot_with_bridge.launch.py  # 视觉节点 + 电机舵机桥接示例
+│   └── mipi_cam_gs130w.launch.py           # RDK GS130w 摄像头驱动
+├── scripts/
+│   ├── camera_calibration.py      # 棋盘格相机标定
+│   ├── deploy_models.sh           # BPU 模型部署脚本
+│   ├── deploy_to_rdk.sh           # RDK 部署脚本（Bash，含SCP）
+│   ├── deploy_to_rdk.ps1          # RDK 部署脚本（PowerShell，含SCP）
+│   └── offline_simulation.py      # PC 离线仿真
+├── docs/
+│   └── RDK部署指南.md             # RDK 部署详细说明
+├── package.xml
+├── setup.py
+├── setup.cfg
+├── requirements.txt
+└── README.md
+</pre>
+  </div>
+</div>
+
+<h2>二、核心节点</h2>
+
+<div class="card">
+  <div class="card-header" onclick="toggle(this)">
+    <span>camera_node.py <span class="badge badge-core">核心</span></span>
+    <span class="toggle">▶</span>
+  </div>
+  <div class="card-body">
+    <p>负责图像采集与发布。</p>
+    <ul>
+      <li>支持 USB 摄像头（OpenCV）和 MIPI 相机转发两种模式</li>
+      <li>发布 <code>/rescue_robot/image_raw</code> 和 <code>/rescue_robot/camera_info</code></li>
+    </ul>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header" onclick="toggle(this)">
+    <span>body_detector_node.py <span class="badge badge-core">核心</span></span>
+    <span class="toggle">▶</span>
+  </div>
+  <div class="card-body">
+    <p>人体检测与单目测距。</p>
+    <ul>
+      <li>优先使用 BPU 模型，未找到则回退到 ONNX / 测试模式</li>
+      <li>基于人体平均身高和检测框像素高度实现相似三角形测距</li>
+      <li>带简单 IOU 跟踪，避免重复识别</li>
+      <li>发布 <code>/rescue_robot/body_detections</code> 和 <code>/rescue_robot/nearest_human_distance</code></li>
+    </ul>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header" onclick="toggle(this)">
+    <span>depth_estimator_node.py <span class="badge badge-core">核心</span></span>
+    <span class="toggle">▶</span>
+  </div>
+  <div class="card-body">
+    <p>单目深度估计与可通行区域分析。</p>
+    <ul>
+      <li>可加载 Depth Anything V2 Small ONNX 或订阅外部深度节点</li>
+      <li>对车前 ROI 做深度阈值分割，区分障碍与可通行区域</li>
+      <li>计算可通行区域中心偏移，引导转向</li>
+      <li>发布 <code>/rescue_robot/depth_image</code>、<code>/rescue_robot/passable_mask</code>、<code>/rescue_robot/nearest_obstacle_distance</code>、<code>/rescue_robot/passable_offset</code></li>
+    </ul>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header" onclick="toggle(this)">
+    <span>visualization_node.py <span class="badge badge-core">核心</span></span>
+    <span class="toggle">▶</span>
+  </div>
+  <div class="card-body">
+    <p>可视化与日志。</p>
+    <ul>
+      <li>叠加人体框、距离、状态、深度图小窗</li>
+      <li>发布 <code>/rescue_robot/overlay_image</code></li>
+      <li>定时发布搜救统计日志</li>
+    </ul>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header" onclick="toggle(this)">
+    <span>actuator_bridge_example.py <span class="badge badge-core">核心</span></span>
+    <span class="toggle">▶</span>
+  </div>
+  <div class="card-body">
+    <p>视觉 -> 电机/舵机桥接示例。</p>
+    <ul>
+      <li>订阅视觉节点输出的人体、障碍、可通行区域信息</li>
+      <li>根据优先级生成 <code>/rescue_robot/cmd_vel</code> 速度指令</li>
+      <li>提供 <code>twist_to_actuators()</code> 示例函数，可直接替换为实际电机 PWM / 舵机角度</li>
+      <li>他人的电机/舵机驱动代码只需订阅 <code>/rescue_robot/cmd_vel</code> 或参考此节点改造</li>
+    </ul>
+  </div>
+</div>
+
+<h2>三、辅助工具</h2>
+
+<div class="card">
+  <div class="card-header" onclick="toggle(this)">
+    <span>camera_calibration.py <span class="badge badge-tool">工具</span></span>
+    <span class="toggle">▶</span>
+  </div>
+  <div class="card-body">
+    <p>棋盘格相机标定脚本，输出可直接替换 <code>config/camera_params.yaml</code>。</p>
+<pre>
+python3 scripts/camera_calibration.py --collect --device 0 --square_size 0.025
+</pre>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header" onclick="toggle(this)">
+    <span>deploy_models.sh <span class="badge badge-tool">工具</span></span>
+    <span class="toggle">▶</span>
+  </div>
+  <div class="card-body">
+    <p>RDK 板端模型部署脚本，负责复制 TROS 官方人体检测模型并转换 Depth Anything V2 Small 为 BPU bin。</p>
+<pre>
+bash scripts/deploy_models.sh
+</pre>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header" onclick="toggle(this)">
+    <span>offline_simulation.py <span class="badge badge-tool">工具</span></span>
+    <span class="toggle">▶</span>
+  </div>
+  <div class="card-body">
+    <p>无需 RDK 和 ROS2 的离线仿真，在 PC 上验证视觉算法链路。</p>
+<pre>
+python3 scripts/offline_simulation.py
+</pre>
+  </div>
+</div>
+
+<h2>四、RDK GS130w 单目 MIPI 摄像头使用说明</h2>
+<p>本项目默认使用 <strong>RDK GS130w</strong> 单目 MIPI 摄像头。使用流程如下：</p>
+<ol>
+  <li>确认 <code>config/camera_params.yaml</code> 中 <code>camera.camera_type</code> 为 <code>mipi</code>，<code>mipi_topic</code> 指向 <code>/mipi_cam/image_raw</code>。</li>
+  <li>安装并启动 TROS 官方 <code>mipi_cam</code> 节点：
+<pre>
+sudo apt install tros-hobot-mipi-cam
+ros2 launch rescue_robot mipi_cam_gs130w.launch.py
+</pre>
+  </li>
+  <li>启动视觉节点：
+<pre>
+ros2 launch rescue_robot rescue_robot.launch.py
+</pre>
+  </li>
+</ol>
+<p>单摄像头即可同时用于人体检测和深度估计，两个视觉节点共享同一个 <code>/rescue_robot/image_raw</code> 话题。</p>
+
+<h2>五、部署到 RDK</h2>
+<p>Windows 电脑推荐使用 PowerShell 一键部署脚本：</p>
+<pre>
+# 1. 修改 scripts/deploy_to_rdk.ps1 中的 RDK_IP
+# 2. 执行部署
+cd rescue_robot
+.\scripts\deploy_to_rdk.ps1
+</pre>
+<p>脚本会自动打包、通过 <code>scp</code> 上传、<code>ssh</code> 解压编译。部署完成后 SSH 登录 RDK 启动即可。</p>
+<p>如果你只想手动用 <code>scp</code> 传，详见 <code>docs/SCP手动部署指南.md</code>，核心命令如下：</p>
+<pre>
+# 1. 打包
+cd C:\Users\jingwai\WorkBuddy\2026-07-05-00-10-44
+tar --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' -czf rescue_robot.tar.gz rescue_robot
+
+# 2. SCP 上传到 RDK（替换 IP）
+scp -P 22 rescue_robot.tar.gz root@192.168.1.100:/tmp/
+
+# 3. 在 RDK 上解压编译
+ssh root@192.168.1.100 "bash -c 'mkdir -p /root/ros2_ws/src && rm -rf /root/ros2_ws/src/rescue_robot && tar -xzf /tmp/rescue_robot.tar.gz -C /root/ros2_ws/src/ && cd /root/ros2_ws && source /opt/tros/setup.bash && colcon build --packages-select rescue_robot --symlink-install'"
+</pre>
+<p>详细步骤见 <code>docs/RDK部署指南.md</code> 和 <code>docs/SCP手动部署指南.md</code>。</p>
+
+<h2>六、快速开始</h2>
+<pre>
+# 1. 启动 mipi_cam 驱动
+ros2 launch rescue_robot mipi_cam_gs130w.launch.py
+
+# 2. 启动视觉节点
+ros2 launch rescue_robot rescue_robot.launch.py
+
+# 3. 启动视觉 + 电机/舵机桥接
+ros2 launch rescue_robot rescue_robot_with_bridge.launch.py
+</pre>
+
+<h2>六、核心话题</h2>
+<ul>
+  <li><code>/rescue_robot/image_raw</code> — 原始相机图像</li>
+  <li><code>/rescue_robot/body_detections</code> — 人体检测结果</li>
+  <li><code>/rescue_robot/nearest_human_distance</code> — 最近人体距离</li>
+  <li><code>/rescue_robot/depth_image</code> — 深度热力图</li>
+  <li><code>/rescue_robot/passable_mask</code> — 可通行区域掩码</li>
+  <li><code>/rescue_robot/nearest_obstacle_distance</code> — 最近障碍距离</li>
+  <li><code>/rescue_robot/passable_offset</code> — 可通行区域中心偏移</li>
+  <li><code>/rescue_robot/overlay_image</code> — 叠加可视化图像</li>
+</ul>
+
+<h2>七、电机/舵机驱动对接</h2>
+<p>视觉节点只负责感知，不直接控制电机/舵机。推荐以下三种方式：</p>
+
+<div class="card">
+  <div class="card-header" onclick="toggle(this)">
+    <span>方案1：订阅 /rescue_robot/cmd_vel</span>
+    <span class="toggle">▶</span>
+  </div>
+  <div class="card-body">
+    <p>本包已提供 <code>actuator_bridge_example.py</code>，将视觉结果转换为 <code>geometry_msgs/Twist</code> 发布到 <code>/rescue_robot/cmd_vel</code>。他人的电机/舵机驱动节点只需订阅该话题。</p>
+<pre>
+ros2 launch rescue_robot rescue_robot_with_bridge.launch.py
+</pre>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header" onclick="toggle(this)">
+    <span>方案2：直接订阅视觉话题</span>
+    <span class="toggle">▶</span>
+  </div>
+  <div class="card-body">
+    <p>他人的驱动代码也可直接订阅：</p>
+    <ul>
+      <li><code>/rescue_robot/body_detections</code>：人体位置与距离</li>
+      <li><code>/rescue_robot/nearest_human_distance</code>：最近人体距离</li>
+      <li><code>/rescue_robot/nearest_obstacle_distance</code>：最近障碍距离</li>
+      <li><code>/rescue_robot/passable_offset</code>：可通行方向</li>
+    </ul>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header" onclick="toggle(this)">
+    <span>方案3：修改 actuator_bridge_example.py</span>
+    <span class="toggle">▶</span>
+  </div>
+  <div class="card-body">
+    <p>如果 <code>cmd_vel</code> 不适合你的底盘，直接修改 <code>twist_to_actuators()</code> 函数，把 Twist 转换为你自己的电机 PWM 或舵机角度。</p>
+  </div>
+</div>
+
+<h2>八、扩展建议</h2>
+<p>如需接入导航和底盘，可订阅以下话题实现决策：</p>
+<ul>
+  <li><code>/rescue_robot/body_detections</code>：人体位置与距离</li>
+  <li><code>/rescue_robot/nearest_obstacle_distance</code>：最近障碍距离</li>
+  <li><code>/rescue_robot/passable_offset</code>：可通行方向</li>
+</ul>
+
+</div>
+<script>
+function toggle(header) {
+  const card = header.parentElement;
+  card.classList.toggle('open');
+}
+</script>
+</body>
+</html>
